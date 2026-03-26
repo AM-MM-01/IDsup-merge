@@ -6,7 +6,7 @@ from typing import Dict, Any, Optional, List
 from flask import Flask, request, jsonify
 
 # ========== НАСТРОЙКИ ==========
-API_TOKEN = os.environ.get('USEDESK_API_TOKEN', "bc6ed228bf8fa594e3b4b8bc8637ba3ce13b6ad5")
+API_TOKEN = os.environ.get('USEDESK_API_TOKEN', "28fc2322dbdafe78adca1213b8b6e4d3d3d00fe1")
 
 TICKET_GET_URL = "https://api.usedesk.ru/ticket"
 TICKET_COMMENT_URL = "https://api.usedesk.ru/create/comment"
