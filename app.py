@@ -35,7 +35,7 @@ EXCLUDED_EMAIL_PATTERNS = [
     "ARBITR", "platiza", "info", "moyapochta", "reply", "robot", "call4life"
 ]
 
-AGENT_USER_ID = int(os.environ.get('AGENT_USER_ID', 207358))
+AGENT_USER_ID = int(os.environ.get('AGENT_USER_ID', 284224))
 # ===============================
 
 app = Flask(__name__)
