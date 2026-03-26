@@ -231,8 +231,7 @@ def webhook():
     if not data:
         return jsonify({"error": "No JSON data"}), 400
 
-    ticket_id = None
-    client_email = None
+    # Извлекаем ticket_id и email
     if 'ticket' in data and isinstance(data['ticket'], dict):
         ticket_data = data['ticket']
         ticket_id = ticket_data.get('id')
@@ -246,20 +245,39 @@ def webhook():
 
     print(f"\n=== Получен вебхук: тикет {ticket_id}, email {client_email} ===")
 
+    # Проверка на исключаемые email
     if should_skip_email(client_email):
         print(f"⏭️ Email {client_email} в списке исключений. Объединение не выполняется.")
         return jsonify({"status": "skipped", "reason": "excluded_email"}), 200
 
-    client_id = get_client_id_by_email(client_email)
-    if not client_id:
-        print(f"❌ Клиент с email {client_email} не найден. Объединение невозможно.")
-        return jsonify({"error": "Client not found"}), 404
+    # Получаем детали тикета, чтобы извлечь client_id
+    ticket_details = get_ticket_details(ticket_id)
+    if not ticket_details:
+        print(f"❌ Не удалось получить данные для тикета {ticket_id}. Объединение невозможно.")
+        return jsonify({"error": "Cannot fetch ticket details"}), 500
 
+    # Извлекаем client_id из данных тикета
+    client_id = None
+    if 'ticket' in ticket_details:
+        client_id = ticket_details['ticket'].get('client_id')
+    if not client_id and 'client_id' in ticket_details:
+        client_id = ticket_details['client_id']
+
+    if not client_id:
+        print(f"❌ Не удалось определить client_id для тикета {ticket_id}. Объединение невозможно.")
+        # Для отладки: выводим структуру ответа
+        print(f"Ответ API: {ticket_details}")
+        return jsonify({"error": "Client ID not found"}), 500
+
+    print(f"Найден client_id: {client_id}")
+
+    # Получаем все открытые тикеты клиента
     open_tickets = get_open_tickets_by_client(client_id)
     if not open_tickets:
         print(f"ℹ️ У клиента {client_email} нет открытых тикетов.")
         return jsonify({"status": "ok", "message": "No open tickets"}), 200
 
+    # Сортируем по ID (старые первыми)
     open_tickets.sort(key=lambda t: t['id'])
     if len(open_tickets) < 2:
         print(f"ℹ️ У клиента {client_email} только один открытый тикет ({open_tickets[0]['id']}). Объединение не требуется.")
@@ -284,10 +302,6 @@ def webhook():
         print(f"⚠️ Не удалось добавить тег 'merge' в тикет {main_ticket['id']}.")
 
     return jsonify({"status": "success"}), 200
-
-@app.route('/health', methods=['GET'])
-def health():
-    return jsonify({"status": "ok"}), 200
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
