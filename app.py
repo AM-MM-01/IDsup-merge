@@ -2,6 +2,7 @@ import requests
 import time
 import os
 import re
+import traceback
 from typing import Dict, Any, Optional, List
 from flask import Flask, request, jsonify
 
@@ -59,6 +60,9 @@ def get_open_tickets_by_client(client_id: int) -> List[Dict[str, Any]]:
         response.raise_for_status()
         data = response.json()
         if isinstance(data, list):
+            # Для отладки: выведем структуру первого тикета
+            if data:
+                print("Пример структуры тикета из списка:", str(data[0])[:500])
             return data
         return []
     except Exception as e:
@@ -169,54 +173,59 @@ def extract_full_info_from_duplicate(ticket_data: Dict[str, Any]) -> Dict[str, A
     return result
 
 def merge_duplicate_into_main(main_ticket_id: int, dup_ticket_id: int) -> bool:
-    print(f"\n  Обработка дубля ID: {dup_ticket_id} (основной: {main_ticket_id})")
-    dup_data = get_ticket_details(dup_ticket_id)
-    if not dup_data:
-        print(f"  ⚠️ Не удалось получить данные для тикета {dup_ticket_id}, пропускаем.")
-        return False
-    info = extract_full_info_from_duplicate(dup_data)
+    try:
+        print(f"\n  Обработка дубля ID: {dup_ticket_id} (основной: {main_ticket_id})")
+        dup_data = get_ticket_details(dup_ticket_id)
+        if not dup_data:
+            print(f"  ⚠️ Не удалось получить данные для тикета {dup_ticket_id}, пропускаем.")
+            return False
+        info = extract_full_info_from_duplicate(dup_data)
 
-    if info["tags"]:
-        if add_tags_to_ticket(main_ticket_id, info["tags"]):
-            print(f"  ✅ Теги добавлены в основной тикет {main_ticket_id}.")
+        if info["tags"]:
+            if add_tags_to_ticket(main_ticket_id, info["tags"]):
+                print(f"  ✅ Теги добавлены в основной тикет {main_ticket_id}.")
+            else:
+                print(f"  ⚠️ Не удалось добавить теги, продолжаем без них.")
         else:
-            print(f"  ⚠️ Не удалось добавить теги, продолжаем без них.")
-    else:
-        print(f"  ℹ️ В дубле нет тегов.")
+            print(f"  ℹ️ В дубле нет тегов.")
 
-    print(f"    Найдено комментариев для копирования: {len(info['comments'])}")
-    for comm in info["comments"]:
-        raw_message = comm["message"]
-        if any(phrase in raw_message for phrase in EXCLUDED_PHRASES):
-            print(f"    ⏭️ Пропуск комментария (содержит исключённый текст): ID в дубле {comm.get('id', '?')}")
-            continue
-        cleaned_message = clean_html_wrappers(raw_message)
-        subject_display = info["subject"] if info["subject"] != "Тема не найдена" else "без темы"
-        source_text = f'Перенесено из тикета <a href="https://secure.usedesk.ru/tickets/{dup_ticket_id}">#{dup_ticket_id}</a> (Тема: {subject_display})<br><br>'
-        comment_text = source_text + cleaned_message
-        if comm["files"]:
-            comment_text += "\n\n<b>Вложения:</b><br>"
-            for f in comm["files"]:
-                comment_text += f'- <a href="{f["url"]}">{f["name"]}</a><br>'
-        success = add_comment_to_ticket(main_ticket_id, comment_text, comment_type="private", user_id=AGENT_USER_ID)
-        if success:
-            print(f"  ✅ Приватный комментарий скопирован (ID в дубле: {comm.get('id', '?')}).")
+        print(f"    Найдено комментариев для копирования: {len(info['comments'])}")
+        for comm in info["comments"]:
+            raw_message = comm["message"]
+            if any(phrase in raw_message for phrase in EXCLUDED_PHRASES):
+                print(f"    ⏭️ Пропуск комментария (содержит исключённый текст): ID в дубле {comm.get('id', '?')}")
+                continue
+            cleaned_message = clean_html_wrappers(raw_message)
+            subject_display = info["subject"] if info["subject"] != "Тема не найдена" else "без темы"
+            source_text = f'Перенесено из тикета <a href="https://secure.usedesk.ru/tickets/{dup_ticket_id}">#{dup_ticket_id}</a> (Тема: {subject_display})<br><br>'
+            comment_text = source_text + cleaned_message
+            if comm["files"]:
+                comment_text += "\n\n<b>Вложения:</b><br>"
+                for f in comm["files"]:
+                    comment_text += f'- <a href="{f["url"]}">{f["name"]}</a><br>'
+            success = add_comment_to_ticket(main_ticket_id, comment_text, comment_type="private", user_id=AGENT_USER_ID)
+            if success:
+                print(f"  ✅ Приватный комментарий скопирован (ID в дубле: {comm.get('id', '?')}).")
+            else:
+                print(f"  ❌ Ошибка при копировании комментария (ID в дубле: {comm.get('id', '?')}).")
+
+        if update_ticket_status(dup_ticket_id, "10"):
+            print(f"  ✅ Статус дубля {dup_ticket_id} изменён на 'Объединён'.")
         else:
-            print(f"  ❌ Ошибка при копировании комментария (ID в дубле: {comm.get('id', '?')}).")
+            print(f"  ❌ Ошибка при обновлении статуса дубля {dup_ticket_id}.")
+            return False
 
-    if update_ticket_status(dup_ticket_id, "10"):
-        print(f"  ✅ Статус дубля {dup_ticket_id} изменён на 'Объединён'.")
-    else:
-        print(f"  ❌ Ошибка при обновлении статуса дубля {dup_ticket_id}.")
+        dup_comment = f'Тикет объединен с тикетом <a href="https://secure.usedesk.ru/tickets/{main_ticket_id}">#{main_ticket_id}</a>'
+        if add_comment_to_ticket(dup_ticket_id, dup_comment, comment_type="private", user_id=AGENT_USER_ID):
+            print(f"  ✅ Приватный комментарий в дубль {dup_ticket_id} добавлен.")
+        else:
+            print(f"  ❌ Ошибка при добавлении приватного комментария в дубль.")
+        time.sleep(REQUEST_DELAY)
+        return True
+    except Exception as e:
+        print(f"  ❌ Исключение в merge_duplicate_into_main: {e}")
+        traceback.print_exc()
         return False
-
-    dup_comment = f'Тикет объединен с тикетом <a href="https://secure.usedesk.ru/tickets/{main_ticket_id}">#{main_ticket_id}</a>'
-    if add_comment_to_ticket(dup_ticket_id, dup_comment, comment_type="private", user_id=AGENT_USER_ID):
-        print(f"  ✅ Приватный комментарий в дубль {dup_ticket_id} добавлен.")
-    else:
-        print(f"  ❌ Ошибка при добавлении приватного комментария в дубль.")
-    time.sleep(REQUEST_DELAY)
-    return True
 
 def should_skip_email(email: str) -> bool:
     email_lower = email.lower()
@@ -227,81 +236,109 @@ def should_skip_email(email: str) -> bool:
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    data = request.get_json()
-    if not data:
-        return jsonify({"error": "No JSON data"}), 400
+    try:
+        data = request.get_json()
+        if not data:
+            print("❌ Нет JSON-данных в запросе")
+            return jsonify({"error": "No JSON data"}), 400
 
-    # Извлекаем ticket_id и email
-    if 'ticket' in data and isinstance(data['ticket'], dict):
-        ticket_data = data['ticket']
-        ticket_id = ticket_data.get('id')
-        client_email = ticket_data.get('email')
-    else:
-        ticket_id = data.get('ticket_id')
-        client_email = data.get('client_email') or data.get('email')
+        print(f"Получены данные: {data}")
 
-    if not ticket_id or not client_email:
-        return jsonify({"error": "Missing ticket_id or client_email"}), 400
+        # Извлекаем ticket_id и email
+        if 'ticket' in data and isinstance(data['ticket'], dict):
+            ticket_data = data['ticket']
+            ticket_id = ticket_data.get('id')
+            client_email = ticket_data.get('email')
+        else:
+            ticket_id = data.get('ticket_id')
+            client_email = data.get('client_email') or data.get('email')
 
-    print(f"\n=== Получен вебхук: тикет {ticket_id}, email {client_email} ===")
+        if not ticket_id or not client_email:
+            print(f"❌ Не хватает данных: ticket_id={ticket_id}, email={client_email}")
+            return jsonify({"error": "Missing ticket_id or client_email"}), 400
 
-    # Проверка на исключаемые email
-    if should_skip_email(client_email):
-        print(f"⏭️ Email {client_email} в списке исключений. Объединение не выполняется.")
-        return jsonify({"status": "skipped", "reason": "excluded_email"}), 200
+        print(f"\n=== Получен вебхук: тикет {ticket_id}, email {client_email} ===")
 
-    # Получаем детали тикета, чтобы извлечь client_id
-    ticket_details = get_ticket_details(ticket_id)
-    if not ticket_details:
-        print(f"❌ Не удалось получить данные для тикета {ticket_id}. Объединение невозможно.")
-        return jsonify({"error": "Cannot fetch ticket details"}), 500
+        if should_skip_email(client_email):
+            print(f"⏭️ Email {client_email} в списке исключений. Объединение не выполняется.")
+            return jsonify({"status": "skipped", "reason": "excluded_email"}), 200
 
-    # Извлекаем client_id из данных тикета
-    client_id = None
-    if 'ticket' in ticket_details:
-        client_id = ticket_details['ticket'].get('client_id')
-    if not client_id and 'client_id' in ticket_details:
-        client_id = ticket_details['client_id']
+        ticket_details = get_ticket_details(ticket_id)
+        if not ticket_details:
+            print(f"❌ Не удалось получить данные для тикета {ticket_id}. Объединение невозможно.")
+            return jsonify({"error": "Cannot fetch ticket details"}), 500
 
-    if not client_id:
-        print(f"❌ Не удалось определить client_id для тикета {ticket_id}. Объединение невозможно.")
-        # Для отладки: выводим структуру ответа
-        print(f"Ответ API: {ticket_details}")
-        return jsonify({"error": "Client ID not found"}), 500
+        # Извлекаем client_id
+        client_id = None
+        if 'ticket' in ticket_details:
+            client_id = ticket_details['ticket'].get('client_id')
+        if not client_id and 'client_id' in ticket_details:
+            client_id = ticket_details['client_id']
 
-    print(f"Найден client_id: {client_id}")
+        if not client_id:
+            print(f"❌ Не удалось определить client_id для тикета {ticket_id}. Объединение невозможно.")
+            print(f"Ответ API: {ticket_details}")
+            return jsonify({"error": "Client ID not found"}), 500
 
-    # Получаем все открытые тикеты клиента
-    open_tickets = get_open_tickets_by_client(client_id)
-    if not open_tickets:
-        print(f"ℹ️ У клиента {client_email} нет открытых тикетов.")
-        return jsonify({"status": "ok", "message": "No open tickets"}), 200
+        print(f"Найден client_id: {client_id}")
 
-    # Сортируем по ID (старые первыми)
-    open_tickets.sort(key=lambda t: t['id'])
-    if len(open_tickets) < 2:
-        print(f"ℹ️ У клиента {client_email} только один открытый тикет ({open_tickets[0]['id']}). Объединение не требуется.")
-        return jsonify({"status": "ok", "message": "Only one open ticket"}), 200
+        open_tickets = get_open_tickets_by_client(client_id)
+        if not open_tickets:
+            print(f"ℹ️ У клиента {client_email} нет открытых тикетов.")
+            return jsonify({"status": "ok", "message": "No open tickets"}), 200
 
-    main_ticket = open_tickets[0]
-    duplicate_tickets = open_tickets[1:]
+        # Сортируем по ID (старые первыми)
+        open_tickets.sort(key=lambda t: t['id'])
+        if len(open_tickets) < 2:
+            print(f"ℹ️ У клиента {client_email} только один открытый тикет ({open_tickets[0]['id']}). Объединение не требуется.")
+            return jsonify({"status": "ok", "message": "Only one open ticket"}), 200
 
-    print(f"Основной тикет: {main_ticket['id']}")
-    print(f"Дубли: {[t['id'] for t in duplicate_tickets]}")
+        main_ticket = open_tickets[0]
+        duplicate_tickets = open_tickets[1:]
 
-    for dup in duplicate_tickets:
-        if dup.get('status', {}).get('id') == 10:
-            print(f"⏭️ Тикет {dup['id']} уже имеет статус 'Объединён', пропускаем.")
-            continue
-        merge_duplicate_into_main(main_ticket['id'], dup['id'])
+        print(f"Основной тикет: {main_ticket['id']}")
+        print(f"Дубли: {[t['id'] for t in duplicate_tickets]}")
 
-    print(f"🏷️ Добавление тега 'merge' в основной тикет {main_ticket['id']}...")
-    if add_tags_to_ticket(main_ticket['id'], ["merge"]):
-        print(f"✅ Тег 'merge' успешно добавлен в тикет {main_ticket['id']}.")
-    else:
-        print(f"⚠️ Не удалось добавить тег 'merge' в тикет {main_ticket['id']}.")
+        for dup in duplicate_tickets:
+            try:
+                # Безопасное получение ID статуса
+                status_id = None
+                if 'status' in dup:
+                    if isinstance(dup['status'], dict):
+                        status_id = dup['status'].get('id')
+                    else:
+                        status_id = dup['status']
+                if status_id == 10:
+                    print(f"⏭️ Тикет {dup['id']} уже имеет статус 'Объединён', пропускаем.")
+                    continue
+                merge_duplicate_into_main(main_ticket['id'], dup['id'])
+            except Exception as e:
+                print(f"❌ Ошибка при обработке дубля {dup.get('id', '?')}: {e}")
+                traceback.print_exc()
 
-    return jsonify({"status": "success"}), 200
+        print(f"🏷️ Добавление тега 'merge' в основной тикет {main_ticket['id']}...")
+        if add_tags_to_ticket(main_ticket['id'], ["merge"]):
+            print(f"✅ Тег 'merge' успешно добавлен в тикет {main_ticket['id']}.")
+        else:
+            print(f"⚠️ Не удалось добавить тег 'merge' в тикет {main_ticket['id']}.")
+
+        return jsonify({"status": "success"}), 200
+
+    except Exception as e:
+        print("=" * 50)
+        print("ОШИБКА В WEBHOOK:")
+        traceback.print_exc()
+        print("=" * 50)
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
+
+@app.route('/', methods=['POST'])
+def root_webhook():
+    """Обработка POST-запросов на корневой путь."""
+    return webhook()
+
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({"status": "ok"}), 200
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
