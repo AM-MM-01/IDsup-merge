@@ -44,6 +44,9 @@ EXCLUDED_PHRASES = [
 EXCLUDED_EMAIL_PATTERNS = [
     "ARBITR", "platiza", "info", "moyapochta", "reply", "robot", "call4life"
 ]
+
+AGENT_USER_ID = 284224          # ID агента, от имени которого добавляются комментарии
+MAX_CONCURRENT_TASKS = 5        # Количество параллельно обрабатываемых вебхуков
 # ===============================
 
 # Блокировки для предотвращения одновременной обработки одного клиента
@@ -63,7 +66,6 @@ def lock_client(client_id: int, timeout: float = LOCK_TIMEOUT) -> bool:
 def unlock_client(client_id: int) -> None:
     _get_client_lock(client_id).release()
 
-# Пул потоков (ограничиваем количество одновременно обрабатываемых вебхуков)
 _task_semaphore = Semaphore(MAX_CONCURRENT_TASKS)
 
 app = Flask(__name__)
@@ -269,7 +271,6 @@ def is_ticket_allowed(ticket: Dict[str, Any]) -> bool:
 # ------------------------------------------------------------
 
 def process_webhook_async(data: Dict[str, Any]):
-    """Фоновая задача для обработки вебхука."""
     try:
         # Извлекаем ticket_id, email и channel_id
         if 'ticket' in data and isinstance(data['ticket'], dict):
@@ -322,14 +323,27 @@ def process_webhook_async(data: Dict[str, Any]):
             return
 
         try:
+            # Даём API немного времени для синхронизации
+            time.sleep(1)
+
+            # Получаем все открытые тикеты клиента
+            all_open_tickets = get_open_tickets_by_client(client_id)
+
+            # Добавляем текущий тикет, если его нет в списке (но он открыт и разрешён)
+            current_ticket_in_list = any(t['id'] == ticket_id for t in all_open_tickets)
+            if not current_ticket_in_list:
+                print(f"Тикет {ticket_id} не найден в списке открытых, добавляем вручную.")
+                # ticket_obj уже содержит данные (плоская структура)
+                if ticket_obj.get('status_id') == 1 and is_ticket_allowed(ticket_obj):
+                    all_open_tickets.append(ticket_obj)
+                    print(f"Тикет {ticket_id} добавлен в список для обработки.")
+                else:
+                    print(f"Тикет {ticket_id} не добавлен: status={ticket_obj.get('status_id')}, allowed={is_ticket_allowed(ticket_obj)}")
+
             max_iterations = 5
             main_ticket_id = None
             for iteration in range(max_iterations):
-                all_open_tickets = get_open_tickets_by_client(client_id)
-                if not all_open_tickets:
-                    print(f"Итерация {iteration+1}: нет открытых тикетов.")
-                    break
-
+                # Фильтруем разрешённые тикеты
                 allowed_tickets = []
                 for t in all_open_tickets:
                     if not is_ticket_allowed(t):
@@ -371,7 +385,13 @@ def process_webhook_async(data: Dict[str, Any]):
                 for dup in duplicates:
                     merge_duplicate_into_main(main_ticket_id, dup['id'])
 
+                # Обновляем список открытых тикетов для следующей итерации
                 time.sleep(1)
+                all_open_tickets = get_open_tickets_by_client(client_id)
+                # Снова добавляем текущий тикет, если его нет (хотя он уже должен быть)
+                current_ticket_in_list = any(t['id'] == ticket_id for t in all_open_tickets)
+                if not current_ticket_in_list and is_ticket_allowed(ticket_obj):
+                    all_open_tickets.append(ticket_obj)
 
             if main_ticket_id:
                 print(f"✅ Объединение завершено. Основной тикет: {main_ticket_id}")
