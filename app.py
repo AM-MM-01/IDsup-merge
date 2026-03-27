@@ -39,7 +39,7 @@ EXCLUDED_EMAIL_PATTERNS = [
 ]
 
 AGENT_USER_ID = int(os.environ.get('AGENT_USER_ID', 284224))
-MAX_CONCURRENT_TASKS = int(os.environ.get('MAX_CONCURRENT_TASKS', 5))
+MAX_CONCURRENT_TASKS = int(os.environ.get('MAX_CONCURRENT_TASKS', 10))
 # ===============================
 
 # Блокировки для предотвращения одновременной обработки одного клиента
