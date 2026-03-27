@@ -7,8 +7,15 @@ from typing import Dict, Any, Optional, List
 from flask import Flask, request, jsonify
 from threading import Lock, Thread, Semaphore
 
-# ========== НАСТРОЙКИ ==========
-API_TOKEN = os.environ.get('USEDESK_API_TOKEN', "28fc2322dbdafe78adca1213b8b6e4d3d3d00fe1")
+# ========== НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ==========
+# Обязательные переменные
+API_TOKEN = os.environ.get('USEDESK_API_TOKEN')
+if not API_TOKEN:
+    raise RuntimeError("Переменная окружения USEDESK_API_TOKEN не установлена!")
+
+# Необязательные переменные (если не заданы, используются значения по умолчанию)
+AGENT_USER_ID = int(os.environ.get('AGENT_USER_ID', 284224))
+MAX_CONCURRENT_TASKS = int(os.environ.get('MAX_CONCURRENT_TASKS', 50))
 
 TICKET_GET_URL = "https://api.usedesk.ru/ticket"
 TICKET_COMMENT_URL = "https://api.usedesk.ru/create/comment"
@@ -37,9 +44,6 @@ EXCLUDED_PHRASES = [
 EXCLUDED_EMAIL_PATTERNS = [
     "ARBITR", "platiza", "info", "moyapochta", "reply", "robot", "call4life"
 ]
-
-AGENT_USER_ID = int(os.environ.get('AGENT_USER_ID', 284224))
-MAX_CONCURRENT_TASKS = int(os.environ.get('MAX_CONCURRENT_TASKS', 50))
 # ===============================
 
 # Блокировки для предотвращения одновременной обработки одного клиента
