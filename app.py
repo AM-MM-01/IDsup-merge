@@ -44,9 +44,6 @@ EXCLUDED_PHRASES = [
 EXCLUDED_EMAIL_PATTERNS = [
     "ARBITR", "platiza", "info", "moyapochta", "reply", "robot", "call4life"
 ]
-
-AGENT_USER_ID = 284224          # ID агента, от имени которого добавляются комментарии
-MAX_CONCURRENT_TASKS = 5        # Количество параллельно обрабатываемых вебхуков
 # ===============================
 
 # Блокировки для предотвращения одновременной обработки одного клиента
@@ -272,19 +269,65 @@ def is_ticket_allowed(ticket: Dict[str, Any]) -> bool:
 
 def process_webhook_async(data: Dict[str, Any]):
     try:
-        # ... (извлечение ticket_id, client_email, channel_id, проверки) ...
+        # Извлекаем ticket_id, email и channel_id
+        if 'ticket' in data and isinstance(data['ticket'], dict):
+            ticket_data = data['ticket']
+            ticket_id = ticket_data.get('id')
+            client_email = ticket_data.get('email')
+            channel_id = ticket_data.get('channel_id')
+        else:
+            ticket_id = data.get('ticket_id')
+            client_email = data.get('client_email') or data.get('email')
+            channel_id = data.get('channel_id')
+
+        if not ticket_id or not client_email:
+            print(f"❌ Не хватает данных: ticket_id={ticket_id}, email={client_email}")
+            return
+
+        print(f"\n=== Обработка вебхука (фон): тикет {ticket_id}, email {client_email}, channel_id {channel_id} ===")
+
+        if channel_id != 62224:
+            print(f"⏭️ Тикет из канала {channel_id} (не 62224). Объединение не выполняется.")
+            return
+
+        if should_skip_email(client_email):
+            print(f"⏭️ Email {client_email} в списке исключений. Объединение не выполняется.")
+            return
+
+        ticket_details = get_ticket_details(ticket_id)
+        if not ticket_details:
+            print(f"❌ Не удалось получить данные для тикета {ticket_id}. Объединение невозможно.")
+            return
+
+        if 'ticket' in ticket_details:
+            ticket_obj = ticket_details['ticket']
+        else:
+            ticket_obj = ticket_details
+
+        if not is_ticket_allowed(ticket_obj):
+            print(f"⏭️ Тикет {ticket_id} не разрешён для объединения: assignee_id={ticket_obj.get('assignee_id')}, group={ticket_obj.get('group')}")
+            return
+
+        client_id = ticket_obj.get('client_id')
+        if not client_id:
+            print(f"❌ Не удалось определить client_id для тикета {ticket_id}.")
+            return
+
+        print(f"Найден client_id: {client_id}")
+
+        # Блокируем клиента (если уже обрабатывается, ждём таймаут)
         if not lock_client(client_id):
-            print(f"❌ Не удалось получить блокировку для клиента {client_id}")
+            print(f"❌ Не удалось получить блокировку для клиента {client_id} (таймаут {LOCK_TIMEOUT} сек). Возможно, уже обрабатывается.")
             return
 
         try:
             # Даём API немного времени для синхронизации
-            time.sleep(2)  # увеличено до 2 секунд
+            time.sleep(2)
 
             # Получаем все открытые тикеты клиента
             all_open_tickets = get_open_tickets_by_client(client_id)
 
-            # Добавляем текущий тикет, если его нет в списке
+            # Добавляем текущий тикет, если его нет в списке (на случай задержки API)
             current_ticket_in_list = any(t['id'] == ticket_id for t in all_open_tickets)
             if not current_ticket_in_list:
                 print(f"Тикет {ticket_id} не найден в списке открытых, добавляем вручную.")
@@ -345,9 +388,9 @@ def process_webhook_async(data: Dict[str, Any]):
                     processed_dup_ids.add(dup['id'])
 
                 # Обновляем список открытых тикетов для следующей итерации
-                time.sleep(2)  # пауза увеличена до 2 секунд для надёжности
+                time.sleep(2)
                 all_open_tickets = get_open_tickets_by_client(client_id)
-                # Снова добавляем текущий тикет, если его нет (на случай задержки API)
+                # Снова добавляем текущий тикет, если его нет
                 current_ticket_in_list = any(t['id'] == ticket_id for t in all_open_tickets)
                 if not current_ticket_in_list and is_ticket_allowed(ticket_obj):
                     all_open_tickets.append(ticket_obj)
