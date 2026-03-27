@@ -189,13 +189,24 @@ def extract_full_info_from_duplicate(ticket_data: Dict[str, Any]) -> Dict[str, A
 
 def merge_duplicate_into_main(main_ticket_id: int, dup_ticket_id: int) -> bool:
     try:
-        print(f"\n  Обработка дубля ID: {dup_ticket_id} (основной: {main_ticket_id})")
+        # 1. Проверяем, что дубль существует и имеет статус 1 (открыт)
         dup_data = get_ticket_details(dup_ticket_id)
         if not dup_data:
             print(f"  ⚠️ Не удалось получить данные для тикета {dup_ticket_id}, пропускаем.")
             return False
+
+        dup_ticket = dup_data.get('ticket', dup_data)
+        dup_status = dup_ticket.get('status_id') or dup_ticket.get('status')
+        if isinstance(dup_status, dict):
+            dup_status = dup_status.get('id')
+        if dup_status != 1:
+            print(f"  ⏭️ Тикет {dup_ticket_id} не является открытым (статус {dup_status}), пропускаем.")
+            return False
+
+        print(f"\n  Обработка дубля ID: {dup_ticket_id} (основной: {main_ticket_id})")
         info = extract_full_info_from_duplicate(dup_data)
 
+        # 2. Перенос тегов (если есть)
         if info["tags"]:
             if add_tags_to_ticket(main_ticket_id, info["tags"]):
                 print(f"  ✅ Теги добавлены в основной тикет {main_ticket_id}.")
@@ -204,6 +215,7 @@ def merge_duplicate_into_main(main_ticket_id: int, dup_ticket_id: int) -> bool:
         else:
             print(f"  ℹ️ В дубле нет тегов.")
 
+        # 3. Копирование комментариев
         print(f"    Найдено комментариев для копирования: {len(info['comments'])}")
         for comm in info["comments"]:
             raw_message = comm["message"]
@@ -224,12 +236,14 @@ def merge_duplicate_into_main(main_ticket_id: int, dup_ticket_id: int) -> bool:
             else:
                 print(f"  ❌ Ошибка при копировании комментария (ID в дубле: {comm.get('id', '?')}).")
 
+        # 4. Обновление статуса дубля на 10 (Объединён)
         if update_ticket_status(dup_ticket_id, "10"):
             print(f"  ✅ Статус дубля {dup_ticket_id} изменён на 'Объединён'.")
         else:
             print(f"  ❌ Ошибка при обновлении статуса дубля {dup_ticket_id}.")
             return False
 
+        # 5. Добавление комментария в дубль
         dup_comment = f'Тикет объединен с тикетом <a href="https://secure.usedesk.ru/tickets/{main_ticket_id}">#{main_ticket_id}</a>'
         if add_comment_to_ticket(dup_ticket_id, dup_comment, comment_type="private", user_id=AGENT_USER_ID):
             print(f"  ✅ Приватный комментарий в дубль {dup_ticket_id} добавлен.")
@@ -331,6 +345,7 @@ def process_webhook_async(data: Dict[str, Any]):
             current_ticket_in_list = any(t['id'] == ticket_id for t in all_open_tickets)
             if not current_ticket_in_list:
                 print(f"Тикет {ticket_id} не найден в списке открытых, добавляем вручную.")
+                # Проверяем, что тикет открыт (статус 1)
                 if ticket_obj.get('status_id') == 1 and is_ticket_allowed(ticket_obj):
                     all_open_tickets.append(ticket_obj)
                     print(f"Тикет {ticket_id} добавлен в список для обработки.")
@@ -373,10 +388,11 @@ def process_webhook_async(data: Dict[str, Any]):
                         status_val = t.get('status')
                     if isinstance(status_val, dict):
                         status_val = status_val.get('id')
-                    if status_val != 10:
+                    # Обрабатываем только открытые тикеты (статус 1)
+                    if status_val == 1:
                         duplicates.append(t)
                     else:
-                        print(f"Тикет {t['id']} уже имеет статус 10 (Объединён), пропускаем.")
+                        print(f"Тикет {t['id']} имеет статус {status_val} (не открыт), пропускаем.")
 
                 if not duplicates:
                     print(f"Итерация {iteration+1}: нет новых дублей для объединения.")
@@ -390,9 +406,9 @@ def process_webhook_async(data: Dict[str, Any]):
                 # Обновляем список открытых тикетов для следующей итерации
                 time.sleep(2)
                 all_open_tickets = get_open_tickets_by_client(client_id)
-                # Снова добавляем текущий тикет, если его нет
+                # Снова добавляем текущий тикет, если его нет (хотя он уже должен быть)
                 current_ticket_in_list = any(t['id'] == ticket_id for t in all_open_tickets)
-                if not current_ticket_in_list and is_ticket_allowed(ticket_obj):
+                if not current_ticket_in_list and ticket_obj.get('status_id') == 1 and is_ticket_allowed(ticket_obj):
                     all_open_tickets.append(ticket_obj)
 
             if main_ticket_id:
