@@ -249,9 +249,16 @@ def is_ticket_allowed(ticket: Dict[str, Any]) -> bool:
     """
     assignee_id = ticket.get('assignee_id')
     group = ticket.get('group')
+    # Если assignee_id присутствует и не None/0 – запрещаем
     if assignee_id is not None and assignee_id != 0:
         return False
-    if group == 72354:
+    # Проверка группы (может быть числом или объектом)
+    group_id = None
+    if isinstance(group, dict):
+        group_id = group.get('id')
+    else:
+        group_id = group
+    if group_id == 72354:
         return False
     return True
 
@@ -291,24 +298,25 @@ def webhook():
             print(f"⏭️ Email {client_email} в списке исключений. Объединение не выполняется.")
             return jsonify({"status": "skipped", "reason": "excluded_email"}), 200
 
-        # Получаем детали тикета, чтобы проверить его допустимость
+        # Получаем детали тикета
         ticket_details = get_ticket_details(ticket_id)
         if not ticket_details:
             print(f"❌ Не удалось получить данные для тикета {ticket_id}. Объединение невозможно.")
             return jsonify({"error": "Cannot fetch ticket details"}), 500
 
-        # Проверяем, разрешён ли сам тикет
-        if not is_ticket_allowed(ticket_details):
-            print(f"⏭️ Тикет {ticket_id} не разрешён для объединения (есть исполнитель или группа 72354).")
+        # Извлекаем плоскую структуру тикета (в ответе может быть поле "ticket")
+        if 'ticket' in ticket_details:
+            ticket_obj = ticket_details['ticket']
+        else:
+            ticket_obj = ticket_details
+
+        # Проверяем, разрешён ли сам тикет (наличие исполнителя или группа 72354)
+        if not is_ticket_allowed(ticket_obj):
+            print(f"⏭️ Тикет {ticket_id} не разрешён для объединения: assignee_id={ticket_obj.get('assignee_id')}, group={ticket_obj.get('group')}")
             return jsonify({"status": "skipped", "reason": "ticket not allowed"}), 200
 
         # Получаем client_id
-        client_id = None
-        if 'ticket' in ticket_details:
-            client_id = ticket_details['ticket'].get('client_id')
-        if not client_id and 'client_id' in ticket_details:
-            client_id = ticket_details['client_id']
-
+        client_id = ticket_obj.get('client_id')
         if not client_id:
             print(f"❌ Не удалось определить client_id для тикета {ticket_id}.")
             return jsonify({"error": "Client ID not found"}), 500
@@ -356,13 +364,13 @@ def webhook():
 
                 duplicates = []
                 for t in allowed_tickets[1:]:
-                    status_id = None
-                    if 'status' in t:
-                        if isinstance(t['status'], dict):
-                            status_id = t['status'].get('id')
-                        else:
-                            status_id = t['status']
-                    if status_id != 10:
+                    # Извлекаем статус (может быть числом или объектом)
+                    status_val = t.get('status_id')
+                    if status_val is None:
+                        status_val = t.get('status')
+                    if isinstance(status_val, dict):
+                        status_val = status_val.get('id')
+                    if status_val != 10:
                         duplicates.append(t)
 
                 if not duplicates:
