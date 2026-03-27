@@ -77,6 +77,7 @@ def get_ticket_details(ticket_id: int) -> Optional[Dict[str, Any]]:
         return None
 
 def get_open_tickets_by_client(client_id: int) -> List[Dict[str, Any]]:
+    """Возвращает все открытые тикеты клиента (статус 1) без фильтрации."""
     try:
         params = {"api_token": API_TOKEN, "client_id": client_id, "fstatus": 1}
         response = requests.get(TICKETS_LIST_URL, params=params)
@@ -239,6 +240,21 @@ def should_skip_email(email: str) -> bool:
             return True
     return False
 
+def is_ticket_allowed(ticket: Dict[str, Any]) -> bool:
+    """
+    Проверяет, разрешён ли тикет для объединения.
+    Тикет НЕ разрешён, если:
+    - у него назначен исполнитель (assignee_id не None и не 0)
+    - он принадлежит группе 72354
+    """
+    assignee_id = ticket.get('assignee_id')
+    group = ticket.get('group')
+    if assignee_id is not None and assignee_id != 0:
+        return False
+    if group == 72354:
+        return False
+    return True
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -275,12 +291,18 @@ def webhook():
             print(f"⏭️ Email {client_email} в списке исключений. Объединение не выполняется.")
             return jsonify({"status": "skipped", "reason": "excluded_email"}), 200
 
-        # Получаем client_id через детали тикета
+        # Получаем детали тикета, чтобы проверить его допустимость
         ticket_details = get_ticket_details(ticket_id)
         if not ticket_details:
             print(f"❌ Не удалось получить данные для тикета {ticket_id}. Объединение невозможно.")
             return jsonify({"error": "Cannot fetch ticket details"}), 500
 
+        # Проверяем, разрешён ли сам тикет
+        if not is_ticket_allowed(ticket_details):
+            print(f"⏭️ Тикет {ticket_id} не разрешён для объединения (есть исполнитель или группа 72354).")
+            return jsonify({"status": "skipped", "reason": "ticket not allowed"}), 200
+
+        # Получаем client_id
         client_id = None
         if 'ticket' in ticket_details:
             client_id = ticket_details['ticket'].get('client_id')
@@ -302,17 +324,30 @@ def webhook():
             max_iterations = 5
             main_ticket_id = None
             for iteration in range(max_iterations):
-                open_tickets = get_open_tickets_by_client(client_id)
-                if not open_tickets:
+                # Получаем все открытые тикеты клиента
+                all_open_tickets = get_open_tickets_by_client(client_id)
+                if not all_open_tickets:
                     print(f"Итерация {iteration+1}: нет открытых тикетов.")
                     break
 
-                open_tickets.sort(key=lambda t: t['id'])
-                if len(open_tickets) < 2:
-                    print(f"Итерация {iteration+1}: только один открытый тикет ({open_tickets[0]['id']}).")
+                # Фильтруем: оставляем только разрешённые тикеты
+                allowed_tickets = []
+                for t in all_open_tickets:
+                    if not is_ticket_allowed(t):
+                        print(f"Тикет {t['id']} исключён из обработки: assignee_id={t.get('assignee_id')}, group={t.get('group')}")
+                        continue
+                    allowed_tickets.append(t)
+
+                if not allowed_tickets:
+                    print(f"Итерация {iteration+1}: нет разрешённых открытых тикетов.")
                     break
 
-                current_main = open_tickets[0]
+                allowed_tickets.sort(key=lambda t: t['id'])
+                if len(allowed_tickets) < 2:
+                    print(f"Итерация {iteration+1}: только один разрешённый открытый тикет ({allowed_tickets[0]['id']}).")
+                    break
+
+                current_main = allowed_tickets[0]
                 if main_ticket_id is None:
                     main_ticket_id = current_main['id']
                 elif main_ticket_id != current_main['id']:
@@ -320,7 +355,7 @@ def webhook():
                     main_ticket_id = current_main['id']
 
                 duplicates = []
-                for t in open_tickets[1:]:
+                for t in allowed_tickets[1:]:
                     status_id = None
                     if 'status' in t:
                         if isinstance(t['status'], dict):
