@@ -249,20 +249,27 @@ def webhook():
 
         print(f"Получены данные: {data}")
 
-        # Извлекаем ticket_id и email
+        # Извлекаем ticket_id, email и channel_id
         if 'ticket' in data and isinstance(data['ticket'], dict):
             ticket_data = data['ticket']
             ticket_id = ticket_data.get('id')
             client_email = ticket_data.get('email')
+            channel_id = ticket_data.get('channel_id')
         else:
             ticket_id = data.get('ticket_id')
             client_email = data.get('client_email') or data.get('email')
+            channel_id = data.get('channel_id')
 
         if not ticket_id or not client_email:
             print(f"❌ Не хватает данных: ticket_id={ticket_id}, email={client_email}")
             return jsonify({"error": "Missing ticket_id or client_email"}), 400
 
-        print(f"\n=== Получен вебхук: тикет {ticket_id}, email {client_email} ===")
+        print(f"\n=== Получен вебхук: тикет {ticket_id}, email {client_email}, channel_id {channel_id} ===")
+
+        # Проверка канала: обрабатываем только channel_id 62224
+        if channel_id != 62224:
+            print(f"⏭️ Тикет из канала {channel_id} (не 62224). Объединение не выполняется.")
+            return jsonify({"status": "skipped", "reason": f"channel_id {channel_id} not allowed"}), 200
 
         if should_skip_email(client_email):
             print(f"⏭️ Email {client_email} в списке исключений. Объединение не выполняется.")
@@ -286,38 +293,32 @@ def webhook():
 
         print(f"Найден client_id: {client_id}")
 
-        # Блокируем клиента с ожиданием (чтобы параллельные запросы обрабатывались последовательно)
+        # Блокируем клиента с ожиданием
         if not lock_client(client_id):
             print(f"❌ Не удалось получить блокировку для клиента {client_id} (таймаут {LOCK_TIMEOUT} сек)")
             return jsonify({"error": "Client is busy, try again later"}), 503
 
         try:
-            # Основной цикл объединения (повторяем, пока появляются новые дубли)
             max_iterations = 5
             main_ticket_id = None
             for iteration in range(max_iterations):
-                # Получаем актуальный список открытых тикетов
                 open_tickets = get_open_tickets_by_client(client_id)
                 if not open_tickets:
                     print(f"Итерация {iteration+1}: нет открытых тикетов.")
                     break
 
-                # Сортируем по ID (старые первыми)
                 open_tickets.sort(key=lambda t: t['id'])
                 if len(open_tickets) < 2:
                     print(f"Итерация {iteration+1}: только один открытый тикет ({open_tickets[0]['id']}).")
                     break
 
-                # Основной тикет – всегда самый старый
                 current_main = open_tickets[0]
                 if main_ticket_id is None:
                     main_ticket_id = current_main['id']
                 elif main_ticket_id != current_main['id']:
-                    # Если вдруг появился более старый тикет (не должно случиться), обновляем основной
                     print(f"⚠️ Обнаружен более старый тикет {current_main['id']}, делаем его основным.")
                     main_ticket_id = current_main['id']
 
-                # Собираем дубли (статус не 10)
                 duplicates = []
                 for t in open_tickets[1:]:
                     status_id = None
@@ -337,7 +338,6 @@ def webhook():
                 for dup in duplicates:
                     merge_duplicate_into_main(main_ticket_id, dup['id'])
 
-                # Небольшая пауза, чтобы API успело обновиться
                 time.sleep(1)
 
             if main_ticket_id:
