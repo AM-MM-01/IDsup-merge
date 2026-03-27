@@ -8,7 +8,7 @@ from flask import Flask, request, jsonify
 from threading import Lock
 
 # ========== НАСТРОЙКИ ==========
-API_TOKEN = os.environ.get('USEDESK_API_TOKEN', "c126b5f87d07a42e872367607f8e35e41acfa40b")
+API_TOKEN = os.environ.get('USEDESK_API_TOKEN', "28fc2322dbdafe78adca1213b8b6e4d3d3d00fe1")
 
 TICKET_GET_URL = "https://api.usedesk.ru/ticket"
 TICKET_COMMENT_URL = "https://api.usedesk.ru/create/comment"
