@@ -39,13 +39,13 @@ EXCLUDED_EMAIL_PATTERNS = [
 ]
 
 AGENT_USER_ID = int(os.environ.get('AGENT_USER_ID', 284224))
-MAX_CONCURRENT_TASKS = int(os.environ.get('MAX_CONCURRENT_TASKS', 5))  # ограничим количество одновременно выполняемых задач
+MAX_CONCURRENT_TASKS = int(os.environ.get('MAX_CONCURRENT_TASKS', 5))
 # ===============================
 
 # Блокировки для предотвращения одновременной обработки одного клиента
 _client_locks = {}
 _client_lock_dict_lock = Lock()
-LOCK_TIMEOUT = 30  # секунд ожидания
+LOCK_TIMEOUT = 30
 
 def _get_client_lock(client_id: int) -> Lock:
     with _client_lock_dict_lock:
@@ -65,11 +65,203 @@ _task_semaphore = Semaphore(MAX_CONCURRENT_TASKS)
 app = Flask(__name__)
 
 # ------------------------------------------------------------
-# Все основные функции (get_ticket_details, get_open_tickets_by_client,
-# clean_html_wrappers, add_comment_to_ticket, update_ticket_status,
-# add_tags_to_ticket, extract_full_info_from_duplicate,
-# merge_duplicate_into_main, should_skip_email, is_ticket_allowed)
-# остаются без изменений (см. предыдущую версию).
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ------------------------------------------------------------
+
+def get_ticket_details(ticket_id: int) -> Optional[Dict[str, Any]]:
+    payload = {"api_token": API_TOKEN, "ticket_id": ticket_id}
+    try:
+        print(f"    Запрос данных тикета {ticket_id}...")
+        response = requests.post(TICKET_GET_URL, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        if "error" in data:
+            print(f"    ❌ Ошибка API: {data['error']}")
+            return None
+        return data
+    except Exception as e:
+        print(f"    ❌ Ошибка: {e}")
+        return None
+
+def get_open_tickets_by_client(client_id: int) -> List[Dict[str, Any]]:
+    try:
+        params = {"api_token": API_TOKEN, "client_id": client_id, "fstatus": 1}
+        response = requests.get(TICKETS_LIST_URL, params=params)
+        response.raise_for_status()
+        data = response.json()
+        if isinstance(data, list):
+            return data
+        return []
+    except Exception as e:
+        print(f"Ошибка при получении тикетов клиента {client_id}: {e}")
+        return []
+
+def clean_html_wrappers(message: str) -> str:
+    message = re.sub(r'<html[^>]*>', '', message, flags=re.IGNORECASE)
+    message = re.sub(r'</html>', '', message, flags=re.IGNORECASE)
+    body_match = re.search(r'<body[^>]*>(.*?)</body>', message, flags=re.IGNORECASE | re.DOTALL)
+    if body_match:
+        message = body_match.group(1)
+    else:
+        message = re.sub(r'<body[^>]*>', '', message, flags=re.IGNORECASE)
+        message = re.sub(r'</body>', '', message, flags=re.IGNORECASE)
+    return message
+
+def add_comment_to_ticket(ticket_id: int, comment_text: str,
+                          comment_type: str = "public",
+                          user_id: Optional[int] = None,
+                          client_id: Optional[int] = None) -> bool:
+    payload = {
+        "api_token": API_TOKEN,
+        "ticket_id": ticket_id,
+        "message": comment_text,
+        "type": comment_type,
+        "from": "user"
+    }
+    if user_id:
+        payload["user_id"] = str(user_id)
+    if client_id:
+        payload["client_id"] = client_id
+    try:
+        print(f"    ➕ Добавление {comment_type} комментария в тикет {ticket_id}...")
+        print(f"    Сообщение (начало): {comment_text[:150]}...")
+        response = requests.post(TICKET_COMMENT_URL, json=payload)
+        response.raise_for_status()
+        result = response.json()
+        print(f"    Ответ сервера: {result}")
+        return result.get("status") == "success"
+    except Exception as e:
+        print(f"    ❌ Исключение: {e}")
+        return False
+
+def update_ticket_status(ticket_id: int, status_id: str) -> bool:
+    payload = {"api_token": API_TOKEN, "ticket_id": ticket_id, "status": status_id}
+    try:
+        print(f"    🔄 Обновление статуса тикета {ticket_id} на {status_id}...")
+        response = requests.post(TICKET_UPDATE_URL, json=payload)
+        response.raise_for_status()
+        result = response.json()
+        print(f"    Ответ сервера: {result}")
+        return result.get("status") == "success"
+    except Exception as e:
+        print(f"    ❌ Исключение: {e}")
+        return False
+
+def add_tags_to_ticket(ticket_id: int, tags: List[str]) -> bool:
+    if not tags:
+        return True
+    success = True
+    for tag in tags:
+        payload = {"api_token": API_TOKEN, "ticket_id": ticket_id, "tag": tag}
+        try:
+            print(f"    🏷️ Добавление тега '{tag}' к тикету {ticket_id}...")
+            response = requests.post(TICKET_UPDATE_URL, json=payload)
+            response.raise_for_status()
+            result = response.json()
+            print(f"    Ответ сервера: {result}")
+            if result.get("status") != "success":
+                success = False
+        except Exception as e:
+            print(f"    ❌ Ошибка при добавлении тега '{tag}': {e}")
+            success = False
+    return success
+
+def extract_full_info_from_duplicate(ticket_data: Dict[str, Any]) -> Dict[str, Any]:
+    result = {"subject": "Тема не найдена", "tags": [], "comments": []}
+    if "ticket" in ticket_data and "subject" in ticket_data["ticket"]:
+        result["subject"] = ticket_data["ticket"]["subject"]
+    if "tags" in ticket_data:
+        result["tags"] = ticket_data["tags"]
+    for c in ticket_data.get("comments", []):
+        comment_info = {
+            "id": c.get("id"),
+            "message": c.get("message", ""),
+            "files": []
+        }
+        if "files" in c and c["files"]:
+            for f in c["files"]:
+                comment_info["files"].append({"name": f.get("name", "Без имени"), "url": f.get("file", "#")})
+        result["comments"].append(comment_info)
+    return result
+
+def merge_duplicate_into_main(main_ticket_id: int, dup_ticket_id: int) -> bool:
+    try:
+        print(f"\n  Обработка дубля ID: {dup_ticket_id} (основной: {main_ticket_id})")
+        dup_data = get_ticket_details(dup_ticket_id)
+        if not dup_data:
+            print(f"  ⚠️ Не удалось получить данные для тикета {dup_ticket_id}, пропускаем.")
+            return False
+        info = extract_full_info_from_duplicate(dup_data)
+
+        if info["tags"]:
+            if add_tags_to_ticket(main_ticket_id, info["tags"]):
+                print(f"  ✅ Теги добавлены в основной тикет {main_ticket_id}.")
+            else:
+                print(f"  ⚠️ Не удалось добавить теги, продолжаем без них.")
+        else:
+            print(f"  ℹ️ В дубле нет тегов.")
+
+        print(f"    Найдено комментариев для копирования: {len(info['comments'])}")
+        for comm in info["comments"]:
+            raw_message = comm["message"]
+            if any(phrase in raw_message for phrase in EXCLUDED_PHRASES):
+                print(f"    ⏭️ Пропуск комментария (содержит исключённый текст): ID в дубле {comm.get('id', '?')}")
+                continue
+            cleaned_message = clean_html_wrappers(raw_message)
+            subject_display = info["subject"] if info["subject"] != "Тема не найдена" else "без темы"
+            source_text = f'Перенесено из тикета <a href="https://secure.usedesk.ru/tickets/{dup_ticket_id}">#{dup_ticket_id}</a> (Тема: {subject_display})<br><br>'
+            comment_text = source_text + cleaned_message
+            if comm["files"]:
+                comment_text += "\n\n<b>Вложения:</b><br>"
+                for f in comm["files"]:
+                    comment_text += f'- <a href="{f["url"]}">{f["name"]}</a><br>'
+            success = add_comment_to_ticket(main_ticket_id, comment_text, comment_type="private", user_id=AGENT_USER_ID)
+            if success:
+                print(f"  ✅ Приватный комментарий скопирован (ID в дубле: {comm.get('id', '?')}).")
+            else:
+                print(f"  ❌ Ошибка при копировании комментария (ID в дубле: {comm.get('id', '?')}).")
+
+        if update_ticket_status(dup_ticket_id, "10"):
+            print(f"  ✅ Статус дубля {dup_ticket_id} изменён на 'Объединён'.")
+        else:
+            print(f"  ❌ Ошибка при обновлении статуса дубля {dup_ticket_id}.")
+            return False
+
+        dup_comment = f'Тикет объединен с тикетом <a href="https://secure.usedesk.ru/tickets/{main_ticket_id}">#{main_ticket_id}</a>'
+        if add_comment_to_ticket(dup_ticket_id, dup_comment, comment_type="private", user_id=AGENT_USER_ID):
+            print(f"  ✅ Приватный комментарий в дубль {dup_ticket_id} добавлен.")
+        else:
+            print(f"  ❌ Ошибка при добавлении приватного комментария в дубль.")
+        time.sleep(REQUEST_DELAY)
+        return True
+    except Exception as e:
+        print(f"  ❌ Исключение в merge_duplicate_into_main: {e}")
+        traceback.print_exc()
+        return False
+
+def should_skip_email(email: str) -> bool:
+    email_lower = email.lower()
+    for pattern in EXCLUDED_EMAIL_PATTERNS:
+        if pattern.lower() in email_lower:
+            return True
+    return False
+
+def is_ticket_allowed(ticket: Dict[str, Any]) -> bool:
+    assignee_id = ticket.get('assignee_id')
+    group = ticket.get('group')
+    if assignee_id is not None and assignee_id != 0:
+        return False
+    group_id = None
+    if isinstance(group, dict):
+        group_id = group.get('id')
+    else:
+        group_id = group
+    if group_id == 72354:
+        return False
+    return True
+
+# ------------------------------------------------------------
+# ФОНОВАЯ ОБРАБОТКА
 # ------------------------------------------------------------
 
 def process_webhook_async(data: Dict[str, Any]):
@@ -92,7 +284,6 @@ def process_webhook_async(data: Dict[str, Any]):
 
         print(f"\n=== Обработка вебхука (фон): тикет {ticket_id}, email {client_email}, channel_id {channel_id} ===")
 
-        # Проверка канала
         if channel_id != 62224:
             print(f"⏭️ Тикет из канала {channel_id} (не 62224). Объединение не выполняется.")
             return
@@ -101,13 +292,11 @@ def process_webhook_async(data: Dict[str, Any]):
             print(f"⏭️ Email {client_email} в списке исключений. Объединение не выполняется.")
             return
 
-        # Получаем детали тикета
         ticket_details = get_ticket_details(ticket_id)
         if not ticket_details:
             print(f"❌ Не удалось получить данные для тикета {ticket_id}. Объединение невозможно.")
             return
 
-        # Извлекаем плоскую структуру тикета
         if 'ticket' in ticket_details:
             ticket_obj = ticket_details['ticket']
         else:
@@ -124,7 +313,6 @@ def process_webhook_async(data: Dict[str, Any]):
 
         print(f"Найден client_id: {client_id}")
 
-        # Блокируем клиента с ожиданием
         if not lock_client(client_id):
             print(f"❌ Не удалось получить блокировку для клиента {client_id} (таймаут {LOCK_TIMEOUT} сек). Возможно, уже обрабатывается.")
             return
@@ -138,7 +326,6 @@ def process_webhook_async(data: Dict[str, Any]):
                     print(f"Итерация {iteration+1}: нет открытых тикетов.")
                     break
 
-                # Фильтруем разрешённые тикеты
                 allowed_tickets = []
                 for t in all_open_tickets:
                     if not is_ticket_allowed(t):
@@ -196,17 +383,18 @@ def process_webhook_async(data: Dict[str, Any]):
         traceback.print_exc()
         print("=" * 50)
 
+# ------------------------------------------------------------
+# МАРШРУТЫ FLASK
+# ------------------------------------------------------------
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Сразу возвращаем 200 и запускаем обработку в фоновом потоке."""
     data = request.get_json()
     if not data:
         return jsonify({"error": "No JSON data"}), 400
 
     print(f"Получен вебхук, ставим в очередь обработки")
 
-    # Используем семафор, чтобы ограничить количество одновременно выполняющихся задач
-    # и не создать слишком много потоков
     def run_with_semaphore():
         try:
             _task_semaphore.acquire()
@@ -215,7 +403,7 @@ def webhook():
             _task_semaphore.release()
 
     thread = Thread(target=run_with_semaphore)
-    thread.daemon = True  # чтобы поток завершился при остановке приложения
+    thread.daemon = True
     thread.start()
 
     return jsonify({"status": "accepted"}), 200
