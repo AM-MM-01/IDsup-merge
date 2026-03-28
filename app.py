@@ -199,6 +199,10 @@ def merge_duplicate_into_main(main_ticket_id: int, dup_ticket_id: int) -> bool:
         dup_status = dup_ticket.get('status_id') or dup_ticket.get('status')
         if isinstance(dup_status, dict):
             dup_status = dup_status.get('id')
+        try:
+            dup_status = int(dup_status)
+        except (TypeError, ValueError):
+            pass
         if dup_status != 1:
             print(f"  ⏭️ Тикет {dup_ticket_id} не является открытым (статус {dup_status}), пропускаем.")
             return False
@@ -277,6 +281,29 @@ def is_ticket_allowed(ticket: Dict[str, Any]) -> bool:
         return False
     return True
 
+def wait_for_status_1(ticket_id: int, timeout: int = 15, interval: int = 2) -> bool:
+    """Ожидает, пока статус тикета не станет 1. Возвращает True, если статус 1, иначе False."""
+    start = time.time()
+    while time.time() - start < timeout:
+        ticket_details = get_ticket_details(ticket_id)
+        if not ticket_details:
+            print(f"    Не удалось получить данные тикета {ticket_id} при ожидании статуса.")
+            return False
+        ticket_obj = ticket_details.get('ticket', ticket_details)
+        status_val = ticket_obj.get('status_id') or ticket_obj.get('status')
+        if isinstance(status_val, dict):
+            status_val = status_val.get('id')
+        try:
+            status_val = int(status_val)
+        except (TypeError, ValueError):
+            pass
+        if status_val == 1:
+            return True
+        print(f"    Статус тикета {ticket_id} = {status_val}, ожидаем 1...")
+        time.sleep(interval)
+    print(f"    Таймаут ожидания статуса 1 для тикета {ticket_id}")
+    return False
+
 # ------------------------------------------------------------
 # ФОНОВАЯ ОБРАБОТКА
 # ------------------------------------------------------------
@@ -318,6 +345,11 @@ def process_webhook_async(data: Dict[str, Any]):
         else:
             ticket_obj = ticket_details
 
+        # Ожидаем, пока статус тикета станет 1 (открыт)
+        if not wait_for_status_1(ticket_id, timeout=15, interval=2):
+            print(f"❌ Тикет {ticket_id} не перешёл в статус 1 за отведённое время, пропускаем.")
+            return
+
         if not is_ticket_allowed(ticket_obj):
             print(f"⏭️ Тикет {ticket_id} не разрешён для объединения: assignee_id={ticket_obj.get('assignee_id')}, group={ticket_obj.get('group')}")
             return
@@ -355,7 +387,7 @@ def process_webhook_async(data: Dict[str, Any]):
 
             max_iterations = 5
             main_ticket_id = None
-            processed_dup_ids = set()  # предотвращает повторную обработку дублей в этом вызове
+            processed_dup_ids = set()
 
             for iteration in range(max_iterations):
                 # Фильтруем разрешённые тикеты
@@ -391,7 +423,6 @@ def process_webhook_async(data: Dict[str, Any]):
                         status_val = t.get('status')
                     if isinstance(status_val, dict):
                         status_val = status_val.get('id')
-                    # Обрабатываем только открытые тикеты (статус 1)
                     if status_val == 1:
                         duplicates.append(t)
                     else:
@@ -409,7 +440,6 @@ def process_webhook_async(data: Dict[str, Any]):
                 # Обновляем список открытых тикетов для следующей итерации
                 time.sleep(2)
                 all_open_tickets = get_open_tickets_by_client(client_id)
-                # Снова добавляем текущий тикет, если его нет (хотя он уже должен быть)
                 current_ticket_in_list = any(t['id'] == ticket_id for t in all_open_tickets)
                 if not current_ticket_in_list and ticket_obj.get('status_id') == 1 and is_ticket_allowed(ticket_obj):
                     all_open_tickets.append(ticket_obj)
