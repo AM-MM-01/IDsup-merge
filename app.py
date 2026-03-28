@@ -345,10 +345,13 @@ def process_webhook_async(data: Dict[str, Any]):
             current_ticket_in_list = any(t['id'] == ticket_id for t in all_open_tickets)
             if not current_ticket_in_list:
                 print(f"Тикет {ticket_id} не найден в списке открытых, добавляем вручную.")
-                # Проверяем, что тикет открыт (статус 1)
+                print(f"  DEBUG: status_id={ticket_obj.get('status_id')}, assignee_id={ticket_obj.get('assignee_id')}, group={ticket_obj.get('group')}")
+                print(f"  DEBUG: is_ticket_allowed={is_ticket_allowed(ticket_obj)}")
                 if ticket_obj.get('status_id') == 1 and is_ticket_allowed(ticket_obj):
                     all_open_tickets.append(ticket_obj)
                     print(f"Тикет {ticket_id} добавлен в список для обработки.")
+                else:
+                    print(f"Тикет {ticket_id} не добавлен: status={ticket_obj.get('status_id')}, allowed={is_ticket_allowed(ticket_obj)}")
 
             max_iterations = 5
             main_ticket_id = None
