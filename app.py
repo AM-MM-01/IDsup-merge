@@ -44,6 +44,9 @@ EXCLUDED_PHRASES = [
 EXCLUDED_EMAIL_PATTERNS = [
     "ARBITR", "platiza", "info", "moyapochta", "reply", "robot", "call4life"
 ]
+
+# Фразы, при наличии которых в note клиента объединение запрещается
+SKIP_MERGE_PHRASES = ["не клиент", "не объединять"]
 # ===============================
 
 # Блокировки для предотвращения одновременной обработки одного клиента
@@ -307,6 +310,45 @@ def wait_for_status_open(ticket_id: int, max_attempts: int = 3, delay: int = 10)
             time.sleep(delay)
     return False
 
+def extract_client_note(ticket_data: Dict[str, Any]) -> Optional[str]:
+    """
+    Извлекает поле note из профиля клиента, связанного с тикетом.
+    Сначала ищет в корневом объекте 'client', затем в комментариях типа 'client'.
+    Возвращает строку note или None, если не найдено.
+    """
+    # 1. Пытаемся найти client на верхнем уровне ответа
+    if 'client' in ticket_data and isinstance(ticket_data['client'], dict):
+        note = ticket_data['client'].get('note')
+        if note:
+            return note
+
+    # 2. Ищем в комментариях, где from == 'client' и есть поле client с note
+    comments = ticket_data.get('comments', [])
+    for comment in comments:
+        if comment.get('from') == 'client':
+            client_obj = comment.get('client')
+            if client_obj and isinstance(client_obj, dict):
+                note = client_obj.get('note')
+                if note:
+                    return note
+    return None
+
+def should_skip_due_to_client_note(ticket_data: Dict[str, Any]) -> bool:
+    """
+    Проверяет, содержит ли note клиента запрещающие фразы.
+    Возвращает True, если объединение нужно пропустить.
+    """
+    note = extract_client_note(ticket_data)
+    if not note:
+        return False
+
+    note_lower = note.lower()
+    for phrase in SKIP_MERGE_PHRASES:
+        if phrase in note_lower:
+            print(f"⛔ В note клиента найдена фраза '{phrase}': {note[:200]}... Объединение отменено.")
+            return True
+    return False
+
 # ------------------------------------------------------------
 # ФОНОВАЯ ОБРАБОТКА
 # ------------------------------------------------------------
@@ -343,6 +385,11 @@ def process_webhook_async(data: Dict[str, Any]):
             print(f"❌ Не удалось получить данные для тикета {ticket_id}. Объединение невозможно.")
             return
 
+        # --- НОВАЯ ПРОВЕРКА: note клиента ---
+        if should_skip_due_to_client_note(ticket_details):
+            print(f"⏭️ Тикет {ticket_id} пропущен из-за пометки в профиле клиента.")
+            return
+
         if 'ticket' in ticket_details:
             ticket_obj = ticket_details['ticket']
         else:
@@ -363,6 +410,10 @@ def process_webhook_async(data: Dict[str, Any]):
             ticket_details = get_ticket_details(ticket_id)
             if not ticket_details:
                 print(f"❌ Не удалось получить данные для тикета {ticket_id} после ожидания.")
+                return
+            # Повторная проверка note (на случай, если за время ожидания пометка изменилась)
+            if should_skip_due_to_client_note(ticket_details):
+                print(f"⏭️ Тикет {ticket_id} пропущен из-за пометки в профиле клиента (после ожидания).")
                 return
             if 'ticket' in ticket_details:
                 ticket_obj = ticket_details['ticket']
