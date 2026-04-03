@@ -350,6 +350,30 @@ def should_skip_due_to_client_note(ticket_data: Dict[str, Any]) -> bool:
     return False
 
 # ------------------------------------------------------------
+# НОВАЯ ФУНКЦИЯ: ПРОВЕРКА НА CAP-ФАЙЛЫ
+# ------------------------------------------------------------
+def has_cap_file(ticket_data: Dict[str, Any]) -> bool:
+    """
+    Проверяет, есть ли в комментариях тикета файлы с именем, начинающимся на 'CAP'.
+    Возвращает True, если хотя бы один файл подходит.
+    """
+    comments = ticket_data.get('comments', [])
+    for comment in comments:
+        files = comment.get('files', [])
+        # Также проверяем одиночный файл в поле 'file' (если есть и это словарь)
+        single_file = comment.get('file')
+        if single_file and isinstance(single_file, dict):
+            files.append(single_file)
+        for file_obj in files:
+            if not isinstance(file_obj, dict):
+                continue
+            name = file_obj.get('name', '')
+            if name and re.match(r'^CAP', name, re.IGNORECASE):
+                return True
+    return False
+# ------------------------------------------------------------
+
+# ------------------------------------------------------------
 # ФОНОВАЯ ОБРАБОТКА
 # ------------------------------------------------------------
 
@@ -390,6 +414,16 @@ def process_webhook_async(data: Dict[str, Any]):
             print(f"⏭️ Тикет {ticket_id} пропущен из-за пометки в профиле клиента.")
             return
 
+        # --- НОВАЯ ПРОВЕРКА НА CAP-ФАЙЛЫ ---
+        if has_cap_file(ticket_details):
+            existing_tags = ticket_details.get('tags', [])
+            if "CAP_system" not in existing_tags:
+                print(f"  🏷️ Обнаружен CAP-файл в тикете {ticket_id}, добавляем тег 'CAP_system'")
+                add_tags_to_ticket(ticket_id, ["CAP_system"])
+            else:
+                print(f"  ℹ️ Тег 'CAP_system' уже есть в тикете {ticket_id}")
+        # ---------------------------------
+
         if 'ticket' in ticket_details:
             ticket_obj = ticket_details['ticket']
         else:
@@ -415,6 +449,13 @@ def process_webhook_async(data: Dict[str, Any]):
             if should_skip_due_to_client_note(ticket_details):
                 print(f"⏭️ Тикет {ticket_id} пропущен из-за пометки в профиле клиента (после ожидания).")
                 return
+            # Повторная проверка CAP-файлов (на случай, если файлы добавились после обновления)
+            if has_cap_file(ticket_details):
+                existing_tags = ticket_details.get('tags', [])
+                if "CAP_system" not in existing_tags:
+                    print(f"  🏷️ Обнаружен CAP-файл в тикете {ticket_id} (после ожидания), добавляем тег 'CAP_system'")
+                    add_tags_to_ticket(ticket_id, ["CAP_system"])
+            # ---------------------------------
             if 'ticket' in ticket_details:
                 ticket_obj = ticket_details['ticket']
             else:
