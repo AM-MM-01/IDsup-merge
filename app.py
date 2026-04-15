@@ -89,14 +89,19 @@ def get_ticket_details(ticket_id: int) -> Optional[Dict[str, Any]]:
         print(f"    ❌ Ошибка: {e}")
         return None
 
-def get_open_tickets_by_client(client_id: int) -> List[Dict[str, Any]]:
+def get_open_tickets_by_client(client_id: int, required_channel_id: int = 62224) -> List[Dict[str, Any]]:
+    """
+    Возвращает открытые тикеты клиента, отфильтрованные по channel_id.
+    """
     try:
         params = {"api_token": API_TOKEN, "client_id": client_id, "fstatus": 1}
         response = requests.get(TICKETS_LIST_URL, params=params)
         response.raise_for_status()
         data = response.json()
         if isinstance(data, list):
-            return data
+            # Фильтруем только тикеты из нужного канала
+            filtered = [t for t in data if t.get('channel_id') == required_channel_id]
+            return filtered
         return []
     except Exception as e:
         print(f"Ошибка при получении тикетов клиента {client_id}: {e}")
@@ -199,6 +204,13 @@ def merge_duplicate_into_main(main_ticket_id: int, dup_ticket_id: int) -> bool:
             return False
 
         dup_ticket = dup_data.get('ticket', dup_data)
+        
+        # НОВАЯ ПРОВЕРКА: channel_id дубля
+        dup_channel = dup_ticket.get('channel_id')
+        if dup_channel != 62224:
+            print(f"  ⏭️ Тикет {dup_ticket_id} имеет channel_id {dup_channel} (не 62224), пропускаем.")
+            return False
+
         dup_status = dup_ticket.get('status_id') or dup_ticket.get('status')
         if isinstance(dup_status, dict):
             dup_status = dup_status.get('id')
@@ -484,15 +496,19 @@ def process_webhook_async(data: Dict[str, Any]):
             # Даём API немного времени для синхронизации
             time.sleep(2)
 
-            all_open_tickets = get_open_tickets_by_client(client_id)
+            # Получаем открытые тикеты клиента, отфильтрованные по channel_id=62224
+            all_open_tickets = get_open_tickets_by_client(client_id, required_channel_id=62224)
 
-            # Добавляем текущий тикет, если его нет в списке
+            # Добавляем текущий тикет, если его нет в списке и он из нужного канала
             current_ticket_in_list = any(t['id'] == ticket_id for t in all_open_tickets)
-            if not current_ticket_in_list:
-                print(f"Тикет {ticket_id} не найден в списке открытых, добавляем вручную.")
-                if is_ticket_allowed(ticket_obj):
-                    all_open_tickets.append(ticket_obj)
-                    print(f"Тикет {ticket_id} добавлен в список для обработки.")
+            if not current_ticket_in_list and is_ticket_allowed(ticket_obj) and ticket_obj.get('channel_id') == 62224:
+                all_open_tickets.append(ticket_obj)
+                print(f"Тикет {ticket_id} добавлен в список для обработки.")
+            else:
+                if current_ticket_in_list:
+                    print(f"Тикет {ticket_id} уже есть в списке открытых.")
+                elif ticket_obj.get('channel_id') != 62224:
+                    print(f"Тикет {ticket_id} имеет channel_id {ticket_obj.get('channel_id')} (не 62224), не добавляем.")
                 else:
                     print(f"Тикет {ticket_id} не добавлен: not allowed")
 
@@ -501,21 +517,23 @@ def process_webhook_async(data: Dict[str, Any]):
             processed_dup_ids = set()
 
             for iteration in range(max_iterations):
-                # Фильтруем разрешённые тикеты
+                # Фильтруем разрешённые тикеты (и дополнительно проверяем channel_id)
                 allowed_tickets = []
                 for t in all_open_tickets:
+                    if t.get('channel_id') != 62224:
+                        continue
                     if not is_ticket_allowed(t):
                         print(f"Тикет {t['id']} исключён из обработки: assignee_id={t.get('assignee_id')}, group={t.get('group')}")
                         continue
                     allowed_tickets.append(t)
 
                 if not allowed_tickets:
-                    print(f"Итерация {iteration+1}: нет разрешённых открытых тикетов.")
+                    print(f"Итерация {iteration+1}: нет разрешённых открытых тикетов из канала 62224.")
                     break
 
                 allowed_tickets.sort(key=lambda t: t['id'])
                 if len(allowed_tickets) < 2:
-                    print(f"Итерация {iteration+1}: только один разрешённый открытый тикет ({allowed_tickets[0]['id']}).")
+                    print(f"Итерация {iteration+1}: только один разрешённый открытый тикет из канала 62224 ({allowed_tickets[0]['id']}).")
                     break
 
                 current_main = allowed_tickets[0]
@@ -549,10 +567,11 @@ def process_webhook_async(data: Dict[str, Any]):
                     processed_dup_ids.add(dup['id'])
 
                 time.sleep(2)
-                all_open_tickets = get_open_tickets_by_client(client_id)
-                # Снова добавляем текущий тикет, если его нет
+                # Обновляем список открытых тикетов, опять фильтруя по channel_id
+                all_open_tickets = get_open_tickets_by_client(client_id, required_channel_id=62224)
+                # Снова добавляем текущий тикет, если его нет и он из нужного канала
                 current_ticket_in_list = any(t['id'] == ticket_id for t in all_open_tickets)
-                if not current_ticket_in_list and is_ticket_allowed(ticket_obj):
+                if not current_ticket_in_list and is_ticket_allowed(ticket_obj) and ticket_obj.get('channel_id') == 62224:
                     all_open_tickets.append(ticket_obj)
 
             if main_ticket_id:
